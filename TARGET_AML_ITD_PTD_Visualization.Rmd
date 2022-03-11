@@ -1,0 +1,633 @@
+---
+title: "Visualize ITDs and PTD reads"
+author: "Jenny Smith"
+date: "August 10, 2021"
+output: html_document
+---
+
+# Set-up 
+
+```{r setup, cache = FALSE, include = FALSE}
+require(knitr)
+knitr::opts_knit$set(root.dir = file.path(HOME,"2021.07.29_IGV_Visualization"))
+```
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.width = 10, fig.height = 10)
+node=Sys.info()[["nodename"]]
+if(!grepl("local", node)){
+  print(node)
+  options(bitmapType = 'cairo')
+  grDevices::X11.options(type='cairo')
+}
+
+options(stringsAsFactors = FALSE)
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+
+library(ggplot2)
+library(gridExtra)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+
+# library(DeGSEA)
+# library(fusBreakpoint)
+getwd()
+```
+
+
+
+#ClinData
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_05.21.21.csv"))
+
+merged <- merged %>% 
+  filter(!is.na(USI), !grepl("Unknown", USI)) %>% 
+  filter(Eligibility_Comments != "remove")
+
+
+dim(merged)
+```
+
+```{r}
+sample_info <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_08.12.21.csv")) 
+
+head(sample_info)
+dim(sample_info)
+# table(is.na(sample_info$Library))
+```
+
+```{r}
+BAM_RNAseq_files <- read.csv(file.path(TARGET,
+                                       "SequencingDataMatrix/BAM_manifests/TARGET_AML_Ribodepleted_and_PolyA_RNAseq_Bam_Manifest_08.12.21.csv")) %>% 
+  filter(grepl("RBD", Lib_Prep))
+
+dim(BAM_RNAseq_files)
+table(BAM_RNAseq_files$Lib_Prep)
+```
+
+```{r}
+missing_bams <- setdiff(sample_info$Sample, BAM_RNAseq_files$Sample)
+missing_counts <- setdiff(BAM_RNAseq_files$Sample, sample_info$Sample)
+
+to_add <- BAM_RNAseq_files %>% 
+  filter(Sample %in% missing_counts) %>% 
+  filter(!grepl("PATGIG|PATISD", Sample)) %>% 
+  arrange(Sample) %>% 
+  select(Sample, Final_Patient_ID, Library, Group, Read_Length_75bp) 
+
+to_track <- sample_info %>% 
+  filter(Sample %in% missing_bams)
+
+# to_add
+# to_track
+# write.csv(to_track,"TARGET_AML_RBD_Missing_BAM_file_9.21.21.csv", row.names = FALSE)
+```
+
+```{r}
+# forRealignment <- sample_info %>% 
+#   filter(grepl("AML|CD34_PB|APL|CellLine|DS|TMD|NBM|JMML|MPN|APL", Group)) %>% 
+#   filter(!grepl("AZA.D|S.1327", Sample), Time_point != "AML") %>% 
+#   select(Sample, Final_Patient_ID, Library, Group, Read_Length_75bp) %>% 
+#   arrange(Group, Sample)
+# 
+# # forRealignment
+# write.csv(forRealignment, "/home/jlsmith3/RNA_seq_Analysis/TARGET_AML_Samples_for_BCCA_GRCh38_Alignment.csv", row.names = FALSE)
+```
+
+
+# Fusion and Mutation Data
+
+```{r message=FALSE, warning=FALSE}
+# fusions <- read_csv(file.path(PROJHOME,"2018.09.11_Combine_Fusion_Calls/Combined_withConfidence_Levels/TARGET_AML_0531_1031_Relapse_Combined_STAR_TransAbyss_CICERO_FusionCalls_withConfidenceLevels_Annotated_6.17.2020.csv"))
+
+fusions <- readr::read_csv(file.path(PROJHOME,"2018.09.11_Combine_Fusion_Calls/Combined_withConfidence_Levels/TARGET_AML_0531_1031_Relapse_Discovery_Combined_STAR_TransAbyss_CICERO_FusionCalls_withConfidenceLevels_Annotated_01.25.21.csv"))
+
+
+dim(fusions) #182596    169
+# fusions$All_Fusions_Called
+```
+
+```{r}
+#REMOVE: SJAML064925
+PTD <- openxlsx::read.xlsx("KMT2A_PTD_send_v2.xlsx") %>% 
+  tibble(.name_repair = "unique") %>% 
+  filter(grepl("yes", KMT2A.PTD)) %>%
+  
+  rename_at(vars(sample...10), ~"USI") %>% 
+  left_join(., select(merged, USI, SJ_ID), 
+            by="USI") %>% 
+  filter(SJ_ID != "SJAML064925") %>% 
+  arrange(desc(fusion_read)) %>% 
+  
+  mutate(Final_Patient_ID=str_split_fixed(sample...4, "_", n=2)[,1]) %>% 
+  select(USI, Final_Patient_ID, SJ_ID, everything()) 
+
+head(PTD)
+# dim(PTD)
+# table(PTD$KMT2A.PTD, useNA="always")
+```
+
+```{r}
+PTD.categories <- PTD %>% 
+  select(Final_Patient_ID, KMT2A.PTD) %>% 
+  distinct() %>% 
+  mutate(USI=str_split_fixed(Final_Patient_ID, "-", n=5)[,3]) %>% 
+  left_join(., select(merged, USI, Protocol),by="USI")
+
+
+dim(PTD.categories)
+table(PTD.categories$Protocol)
+# View(PTD.categories)
+# any(duplicated(PTD.categories$Final_Patient_ID))
+```
+
+```{r}
+ITD.true.positive <- merged %>% 
+  filter(FLT3.ITD.positive.=="Yes" & grepl("^[0-9].[4-9]",FLT3.ITD.allelic.ratio)) %>% 
+  select(USI,FLT3.ITD.positive., FLT3.ITD.allelic.ratio)
+
+
+ITD <- read.csv("Raw_CICERO_Output_ITDs_20200324.csv", row.names = 1) %>% 
+  mutate(USI=str_split_fixed(Patient, pattern = "\\.", n=5)[,3]) %>% 
+  filter(grepl("FLT3", Fusion.Gene),
+         USI %in% ITD.true.positive$USI) %>% 
+  arrange(desc(NumReadsA))
+
+# head(ITD)
+```
+
+
+# Exon Level Counts 
+
+```{r}
+# dir(file.path(TARGET,"RNA/mRNAseq/level3/exon/concat_matrices/"))
+# dir(file.path(TARGET,"RNA/mRNAseq/level3/exon/concat_matrices/2017July_BCCA_0531_1031_Concatenated_GRCh37_Illumina_data"))
+# dir(file.path(TARGET,"RNA/mRNAseq/level3/exon/concat_matrices/2019April_BCCA_0531_1031_Relapse_Concatenated_GRCh37_Illumina_data"))
+```
+
+```{r}
+# This is the old format of the exon level counts. 
+# Needs to have colnames updated. ALSO, Needs to include the rare variants batch which 
+exon_counts_batch1 <- readr::read_csv(file.path(TARGET,"RNA/mRNAseq/level3/exon/concat_matrices/2017July_BCCA_0531_1031_Concatenated_GRCh37_Illumina_data/TARGET_AML_AAML1031_RNASeq_Exon_FractionalCounts.csv"))
+
+
+ID.map <- colnames(exon_counts_batch1) %>% 
+  data.frame(colnames=.) %>% 
+  left_join(.,select(sample_info, Sample,PATIENT_ID_Original), 
+            by=c("colnames"="PATIENT_ID_Original")) %>% 
+  mutate_at(vars(Sample), ~ifelse(is.na(.), colnames, .))
+ 
+
+# ID.map
+# filter(ID.map, is.na(Sample)) #OK
+
+colnames(exon_counts_batch1) <- ID.map$Sample
+
+head(exon_counts_batch1[,1:5])
+dim(exon_counts_batch1)
+```
+
+```{r}
+# exon_counts_batch2 <- readr::read_csv(file.path(TARGET,"RNA/mRNAseq/level3/exon/concat_matrices/2019April_BCCA_0531_1031_Relapse_Concatenated_GRCh37_Illumina_data/TARGET_0531_1031_Relapse_Ribodepleted_RNAseq_exonLevel_FractionalCounts.csv"))
+# 
+# 
+# head(exon_counts_batch2)
+# dim(exon_counts_batch2)
+```
+
+
+```{r}
+exon_tpm <- readr::read_csv(file.path(TARGET,"RNA/mRNAseq/level3/exon/concat_matrices/2017July_BCCA_0531_1031_Concatenated_GRCh37_Illumina_data/TARGET_AML_AAML1031_RNASeq_Exon_RPKM.csv"))
+
+
+ID.map <- colnames(exon_tpm) %>%
+  data.frame(colnames=.) %>%
+  left_join(.,select(sample_info, Sample,PATIENT_ID_Original),
+            by=c("colnames"="PATIENT_ID_Original")) %>%
+  mutate_at(vars(Sample), ~ifelse(is.na(.), colnames, .))
+
+
+colnames(exon_tpm) <- ID.map$Sample
+
+  
+head(exon_tpm[,1:5])
+dim(exon_tpm)
+
+```
+
+# Define Samples 
+
+
+```{r}
+samples_to_include <- sample_info %>% 
+  filter(grepl("dx", Batch)) %>% 
+  filter(Protocol=="AAML1031" | Group == "NBM") %>% 
+  filter(Sample %in% colnames(exon_tpm)) %>% 
+  
+  left_join(., PTD.categories, by="Final_Patient_ID") %>% 
+  left_join(., select(merged, USI, SJ_ID), 
+            by="USI") %>% 
+  
+  mutate_at(vars(KMT2A.PTD), ~case_when(
+    !is.na(.) ~ "KMT2A-PTD", 
+    TRUE ~ Group)) %>% 
+  select(Sample:USI,SJ_ID, KMT2A.PTD, everything())
+  
+
+
+# samples_to_include
+dim(samples_to_include)
+
+# table(duplicated(samples_to_include$Sample))
+table(samples_to_include$KMT2A.PTD)
+# table(is.na(samples_to_include$SJ_ID)) #only NBM lack SJ_IDs
+```
+
+
+
+```{r}
+BAM_dir <-  file.path(SCRATCH, "jlsmith3/IGV")
+
+
+in_bams <- BAM_RNAseq_files %>% 
+  filter(grepl("diagnostic", Time_point)) %>% 
+  filter(USI %in% PTD$USI[1:5] |
+           USI %in% ITD$USI[1:5])  %>%
+  mutate(KMT2A.PTD=ifelse(USI %in% PTD$USI, "Yes", "No"),
+         FLT3.ITD=ifelse(USI %in% ITD$USI, "Yes", "No")) %>%
+  
+  left_join(., select(ITD,Patient, ChrA,PosA, ChrB, PosB),
+            by=c("Sample"="Patient")) %>% 
+  mutate(ITD.pos=paste(paste(ChrA, PosA, sep=":"), 
+                       paste(ChrB, PosB, sep=":"),
+                       sep="|"),
+         KMT2A.pos="chr11:118307207|chr11:118397547") %>% 
+  mutate_at(vars(ITD.pos,KMT2A.pos), ~gsub("chr", "", .)) %>% 
+  mutate(filepath=paste(BAM_dir, filename, sep="/")) %>% 
+  select(Sample:USI, KMT2A.PTD,KMT2A.pos, FLT3.ITD, ITD.pos, 
+         everything())  %>% 
+  arrange(KMT2A.PTD, FLT3.ITD)
+
+
+# in_bams
+# dim(in_bams)
+# write.csv(in_bams,"TARGET_AML_KMT2A.PTD_FLT3.ITD_To_Test.csv", row.names = FALSE)
+```
+
+
+# Subset Counts 
+
+```{r}
+library(edgeR)
+
+in_cts <- as.data.frame(exon_counts_batch1)
+rownames(in_cts) <- paste(exon_counts_batch1$geneSymbol, exon_counts_batch1$exon, sep="_")
+in_cts <- in_cts[,samples_to_include$Sample]
+
+
+
+AML <- ! grepl("BM[0-9]|R[O0][0-9]", colnames(in_cts))
+keep <- rowSums(cpm(in_cts[,AML]) >= 1) >= 0.025*ncol(in_cts[,AML])
+cts.filtered <- in_cts[keep, ]
+
+dge <- DGEList(counts=cts.filtered)
+dge <- calcNormFactors(dge,method = "TMMwsp")
+
+
+# logCPM <- edgeR::cpm(dge,log=TRUE,normalized.lib.sizes=TRUE, prior.count=1)
+CPM <- edgeR::cpm(dge,log=FALSE,normalized.lib.sizes=TRUE, prior.count=1)
+
+
+dim(CPM) #
+head(CPM[,1:5])
+```
+
+
+
+# Exon Expression 
+
+```{r}
+exons <- PTD %>% 
+  filter(gene1=="KMT2A") %>% 
+  arrange(USI) %>%
+  group_by(USI) %>% 
+  mutate(keep=case_when(
+    n() > 1 & fusion_read > 3 ~ TRUE,
+    n() == 1 ~ TRUE, 
+    TRUE ~ FALSE)) %>% 
+  ungroup() %>% 
+  select(USI:fusion_read, keep, everything()) %>% 
+  filter(keep)
+
+
+ptd_exons <- exons %>% 
+  gather(exon, exon_number, gene1_exonnumber:gene2_exonnumber) %>% 
+  select(exon, exon_number) %>% 
+  group_by(exon, exon_number) %>%
+  count()
+
+ptd_exons
+# write.csv(ptd_exons, "TARGET_AML_KMT2A-PTD_Exons_Identified_by_CICERO.csv", row.names = FALSE)
+```
+
+
+
+```{r}
+exon_expn <- 
+  # 
+  # exon_tpm[grep("ENSG00000118058", exon_tpm$geneSymbol),
+  #        c("geneSymbol","exon", grep(paste(in_bams$USI, collapse = "|"), colnames(exon_tpm), value=TRUE))] %>% 
+  # 
+  # CPM[grep("ENSG00000118058", rownames(CPM)),] %>% 
+  # as.data.frame() %>% 
+  # rownames_to_column("Gene") %>% 
+  # separate(Gene, into=c("gene_id", "exon")) %>% 
+  
+  exon_tpm[grep("ENSG00000118058", exon_tpm$geneSymbol), c("geneSymbol","exon",samples_to_include$Sample)] %>% 
+  
+
+  pivot_longer(cols = matches("^TARGET"), names_to = "Sample", values_to = "TPM") %>% 
+  
+  left_join(., samples_to_include,  by="Sample") %>% 
+  mutate(exon=as.factor(exon)) %>% 
+  mutate(KMT2A.PTD=factor(KMT2A.PTD, 
+                          levels=c("KMT2A-PTD", "AML", "NBM"))) %>% 
+  arrange(KMT2A.PTD, Sample) %>% 
+  
+  mutate(PTD_Exons=ifelse(exon %in% ptd_exons$exon_number, TRUE, FALSE)) %>% 
+  mutate(
+        Patient=factor(Sample, levels=unique(Sample)),
+         log2_TPM=log2(TPM+1),
+         PTD_Exons=factor(PTD_Exons, levels=c("TRUE","FALSE"))) %>% 
+
+  
+  group_by(Sample) %>%
+  mutate(p_value=wilcox.test(TPM ~ PTD_Exons, paired=FALSE, alternative = "greater", exact = FALSE)$p.value %>%
+           round(., digits = 3)) %>%
+  ungroup()
+
+
+exon_expn
+```
+
+
+```{r fig.width=15, fig.height=7}
+ptd_exons <-   filter(exon_expn, grepl("^[2-8]$", exon)) 
+
+kmt2a_plot <-  ggplot(ptd_exons, aes(x=exon, y=log2_TPM, fill=KMT2A.PTD)) +
+  geom_point(aes(color=KMT2A.PTD),  
+             position = position_jitterdodge(jitter.width = 0.25), 
+             alpha=0.6) +
+  geom_boxplot(alpha=0.25, aes(fill=KMT2A.PTD), color="black", outlier.color = "orange",outlier.shape = 15, outlier.size =3)  +
+  theme_classic()
+
+
+# kmt2a_plot 
+# ggsave(plot = kmt2a_plot, filename = "TARGET_AML_KMT2A_PTD_Exon_Expression_1031_TPM.pdf", device = "pdf", height = 5, width = 15)
+```
+
+
+
+```{r}
+outlier.list <- exon_expn %>% 
+  filter(KMT2A.PTD=="AML") %>% 
+  filter(exon==8) %>% 
+  mutate(IQR=quantile(log2_TPM, probs = 0.75) -  quantile(log2_TPM, probs = 0.25)) %>% 
+  mutate(Outlier_in_Expression=case_when(
+    log2_TPM > (quantile(log2_TPM, probs = 0.25) + 1.5*IQR) ~ TRUE,
+    TRUE ~ FALSE)) %>% 
+  select(geneSymbol, exon, Sample,KMT2A.PTD, log2_TPM, IQR,Outlier_in_Expression, everything()) %>% 
+  arrange(desc(Outlier_in_Expression), desc(TPM))
+
+
+dim(outlier.list)
+table(outlier.list$Outlier_in_Expression)
+# table(outlier.list$KMT2A.PTD)
+
+# write.csv(outlier.list, "TARGET_AML_KMT2A-PTD_Exon8_Expression_Outliers_TPM.csv", row.names = FALSE)
+```
+
+```{r fig.width=25, fig.height=10}
+
+groups <- unique(exon_expn$KMT2A.PTD)
+plots <- lapply(groups, function(group){
+  
+  input <- filter(exon_expn, KMT2A.PTD == group) %>% 
+    mutate()
+  
+  ggplot(input, aes(x=Sample, y=log2_TPM)) +
+    geom_boxplot(alpha=0.5, aes(fill=PTD_Exons),
+                 outlier.shape=NA) +
+    geom_point(aes(color=PTD_Exons),
+               position = position_jitterdodge(),
+               alpha=0.75) +
+    facet_wrap(~KMT2A.PTD, scales = "free", ncol=1) + 
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1))
+    
+})
+
+names(plots) <- groups
+# plots
+
+```
+
+
+```{r}
+#Nope not gonna work  - its like a 12% detection rate in the supposedly negatives... 
+# and less than half of the TPs have significant difference in expression 
+sig <- exon_expn %>% 
+  select(Sample, KMT2A.PTD, p_value) %>% 
+  distinct() %>% 
+  arrange(KMT2A.PTD, p_value) %>% 
+  filter(p_value < 0.05)
+
+
+table(sig$KMT2A.PTD) #13% of those tested
+# table(samples_to_include$KMT2A.PTD)
+# 131/1024*100
+```
+
+```{r}
+library(patchwork)
+```
+
+```{r fig.width=25, fig.height=7}
+# pdf("TARGET_AML_KMT2A-PTD_exon_expression.pdf", height = 7, width = 25)
+(plots$`KMT2A-PTD` + plots$NBM + plot_layout(widths = c(0.25,1.0))) 
+# dev.off()
+```
+
+```{r}
+# head(exon_expn)
+mat <- exon_expn %>%
+  mutate(gene=paste(geneSymbol, exon, sep="_")) %>% 
+  select(Sample, gene, log2_TPM) %>% 
+  pivot_wider(id_cols=gene, names_from=Sample, values_from=log2_TPM) %>% 
+  as.data.frame() %>% 
+  column_to_rownames("gene") %>% 
+  as.matrix()
+
+anno_col <- exon_expn %>% 
+  select(Sample, AML_Subtype, KMT2A.PTD) %>% 
+  distinct() %>% 
+  column_to_rownames("Sample")
+
+anno_row <- exon_expn %>%
+  mutate(gene=paste(geneSymbol, exon, sep="_")) %>% 
+  select(gene, PTD_Exons) %>% 
+  distinct() %>% 
+  column_to_rownames("gene")
+
+
+dim(mat)
+# head(mat[,1:5])
+```
+
+```{r fig.height=10, fig.width=10}
+col <- len <- 299
+col <- colorRampPalette(c("black","white","red4"))(n=len)
+
+anno_colors <- list("PTD_Exons"=c("TRUE"="red","FALSE"="white"), 
+                    "KMT2A.PTD"=c("KMT2A-PTD"="red",AML="dodgerblue",NBM="grey"), 
+                    "AML_Subtype"=set_names(rainbow(12,s = 0.5),unique(anno_col$AML_Subtype)))
+
+pdf("TARGET_AML_KMT2A-PTD_Exon_Expression_Heatmap.pdf", height = 10, width = 15)
+pheatmap::pheatmap(mat=mat,
+                   col=col,
+                   scale = "column",
+                   clustering_method="complete",
+                   annotation_colors = anno_colors,
+                   annotation_row =  anno_row,
+                   annotation_col = anno_col ,
+                   show_colnames=FALSE, show_rownames = TRUE)
+
+dev.off()
+```
+
+
+
+# K-means clustering
+
+```{r}
+# table(exon_expn$exon, exon_expn$PTD_Exons)
+```
+
+ 
+# Subset bams
+
+```{r}
+my_files_df <- in_bams %>% 
+  select(Sample, filepath)
+
+head(my_files_df)
+```
+
+
+* can define H vs L exon expression based on TPs by Xiaotu 
+* plot unknowns from 0531 
+
+for any ability to compare expression, you would need to basically shuffle the unkowns in two groups: pos vs neg 
+for x iterations, then compare to TPs. HOWEVER, this I can't imagine any way to control for FPs in the uknkowns 
+
+* Or train binary classification (logistic regression) model on knowns
+* and test on the new data - but i would probably need to batch correct. 
+
+
+
+```{r}
+out <- file.path(SCRATCH, "jlsmith3/IGV/subsets/")
+t <- fusBreakpoint::subset_bam(Sample_ID = "TARGET.20.PAVBUX.09A.01R",
+                               breakpoint=list("11:118307207|11:118397547"),
+                               file_manifest = my_files_df, 
+                               scan = FALSE,
+                               outdir = out)
+```
+
+I want to find soft clipped reads (S) and inserstions reads (I) from CIGAR string 
+Chimeric reads  ( 'SA:' tag in the SAM file) - looks like there is no SA tag in the BWA/Jaguar bams... such old technology...
+
+Can use 'XA:' tag from BWA 
+Source: https://www.biostars.org/p/18684/
+
+To find split reads between chr5 and chr11 (maybe) - well it needs it mate as well. 
+cat TARGET.20.PAVNAZ.09A.01R_subset.sam | grep -E "      5       .+XA:Z:11"  | less
+
+https://www.biostars.org/p/17575/
+http://software.broadinstitute.org/software/igv/interpreting_pair_orientations
+
+Steps for Interchromosomal fusion
+1. subset the BAM file by the breakpoint junction locations
+2. input the subset BAM into IGV
+3. color reads by insert size and read orientation 
+4. Zoom in the breakpoint location for one of the breakpoint juncs, right click on a read that had a mate mapped to chromosom of the gene-fusion pair (eg look at NUP98 breakpoint in IGV, then find a colored read where mate is mapped to chr5)
+5. select 'view mate in split screen' from the drop down menu. 
+
+
+I want to subset the BAM file further for only split reads, as well as junction spanning reads. the above only visualised the junction flanking reads (eg pairs on either end of the breakpoint)
+
+Steps For PTD
+1. 
+
+
+
+```{r}
+out <- file.path(SCRATCH, "jlsmith3/IGV/subsets/")
+bam1 <- fusBreakpoint::subset_bam(Sample_ID = "TARGET.20.PAVBUX.09A.01R",
+                               breakpoint=list("11:118307207|11:118397547"),
+                               file_manifest = my_files_df, 
+                               scan = TRUE,
+                               outdir = out)
+```
+
+```{r}
+# Functions should help to define my searches
+?Rsamtools::scanBam()
+?Rsamtools::ScanBamParam()
+```
+
+
+
+
+```{r}
+cigar <- bam1$`11:117307207-119307207`$cigar
+names(cigar) <- bam1$`11:117307207-119307207`$qname
+
+
+softclips <- grep("[1-9]S", cigar, value = TRUE)
+insertions <- grep("[1-9]I", cigar, value = TRUE)
+
+head(softclips)
+```
+
+```{r}
+sc_idx <- softclips[order(softclips, decreasing = T)] %>% grep("[1-5]S",., value=TRUE, invert=TRUE)
+
+sc_idx
+```
+
+* Find the soft clipped read-names 
+* find the soft clipped pair 
+* exract both from the subsetted BAM
+* save as a final BAM -- 
+
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+
